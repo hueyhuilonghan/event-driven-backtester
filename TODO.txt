@@ -1,0 +1,8 @@
+write unit test scripts for:
+  trading_session
+  price_parser
+  compliance
+  statistics
+
+Need to figure out the consistency of how the system handles numbers,
+  whether using the decimal module or the self-written price_parser.

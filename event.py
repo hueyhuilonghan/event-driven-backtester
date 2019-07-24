@@ -1,22 +1,136 @@
+from enum import Enum
+
+
+EventType = Enum("EventType", "TICK BAR SIGNAL ORDER FILL")
+
+
 class Event(object):
     """
     Event is base class providing an interface for all subsequent
     (inherited) events, that will trigger further events in the
     trading infrastructure.
     """
-    pass
+    @property
+    def typename(self):
+        return self.type.name
 
-class MarketEvent(Event):
+
+class TickEvent(Event):
     """
-    Handles the event of receiving a new market update with
-    corresponding bars.
+    Handles the event of receiving a new market update tick,
+    which is defined as a ticker symbol and associated best
+    bid and ask from the top of the order book.
     """
 
-    def __init__(self):
+    def __init__(self, ticker, time, bid, ask):
         """
-        Initialize the MarketEvent.
+        Initialize the TickEvent.
+
+        Parameters:
+        ticker - The ticker symbol, e.g. "GOOG".
+        time - The timestamp of the tick.
+        bid - The best bid price at the time of the tick.
+        ask - The best ask price at the time of the tick.
         """
-        self.type = "MARKET"
+        self.type = EventType.TICK
+        self.ticker = ticker
+        self.time = time
+        self.bid = bid
+        self.ask = ask
+
+    def __str__(self):
+        return "Type: {}, Ticker: {}, Time: {}, Bid: {}, Ask: {}".format(
+                str(self.type), str(self.ticker), str(self.time),
+                str(self.bid), str(self.ask)
+            )
+
+    def __repr__(self):
+        return str(self)
+
+
+class BarEvent(Event):
+    """
+    Handles the event of receiving a new market
+    open-high-low-close-volume bar.
+    """
+    def __init__(
+        self, ticker, time, period,
+        open_price, high_price, low_price,
+        close_price, volume, adj_close_price=None
+    ):
+        """
+        Initializes the BarEvent.
+
+        Parameters:
+        ticker - The ticker symbol, e.g. "GOOG".
+        time - The timestamp of the bar.
+        period - The time period convered by the bar in seconds.
+        open_price - The unadjusted opening price of the bar.
+        high_price - The unadjusted high price of the bar.
+        low_price - The unadjusted low price of the bar.
+        close_price - The unadjusted close price of the bar.
+        volume - The voume of trading within the bar.
+        adj_close_price - The adjusted closing price (e.g.
+            back-adjustment) of the bar.
+
+        Note: It is not advised to use "open", "close" instead
+        of "open_price", "close_price" as "open" is a reserved
+        word in Python.
+        """
+        self.type = EventType.BAR
+        self.ticker = ticker
+        self.time = time
+        self.period = period
+        self.open_price = open_price
+        self.high_price = high_price
+        self.low_price = low_price
+        self.close_price = close_price
+        self.volume = volume
+        self.adj_close_price = adj_close_price
+        self.period_readable = self._readable_period()
+
+    def _readable_period(self):
+        """
+        Creates a human-readable period from the number
+        of seconds specified for "period."
+
+        If no period is found in the lookup table, the human
+        readable period is simply passed through from period,
+        in seconds.
+        """
+        lut = {
+            1: "1sec",
+            5: "5sec",
+            10: "10sec",
+            30: "30sec",
+            60: "1min",
+            300: "5min",
+            600: "10min",
+            900: "15min",
+            1800: "30min",
+            3600: "1hr",
+            86400: "1day",
+            604800: "1wk"
+        }
+        if self.period in lut:
+            return lut[self.period]
+        else:
+            return "{}sec".format(self.period)
+
+    def __str__(self):
+        format_str = "Type: {}, Ticker: {}, Time: {}, Period: {}, " \
+            "Open: {}, High: {}, Low: {}, Close: {}, " \
+            "Adj Close: {}, Volume: {}".format(
+                str(self.type), str(self.ticker), str(self.time),
+                str(self.period_readable), str(self.open_price),
+                str(self.high_price), str(self.low_price),
+                str(self.close_price), str(self.adj_close_price),
+                str(self.volume)
+            )
+        return format_str
+
+    def __repr__(self):
+        return str(self)
 
 
 class SignalEvent(Event):
@@ -25,59 +139,58 @@ class SignalEvent(Event):
     This is received by a Portfolio object and acted upon.
     """
 
-    def __init__(self, symbol, datetime, signal_type, singal_strengh):
+    def __init__(self, ticker, action, suggested_quantity=None):
         """
         Initialize the SignalEvent.
 
         Parameters:
-        symbol - The ticker symbol, e.g. "GOOG".
-        datetime - The timestamp at which the signal was generated.
-        signal_type - "LONG" or "SHORT".
+        ticker - The ticker symbol, e.g. "GOOG".
+        action - "BOT" (for long) or "SLD" (for short).
+        suggested_quantity - Optional positively valued integer
+            representing a suggested absolute quantity of units
+            of an asset to transact in, which is used by the
+            PositionSizer and RiskManager.
         """
 
-        self.type = "SIGNAL"
-        self.symbol = symbol
-        self.datetime = datetime
-        self.signal_type = signal_type
-        self.strength = singal_strengh
+        self.type = EventType.SIGNAL
+        self.ticker = ticker
+        self.action = action
+        self.suggested_quantity = suggested_quantity
 
 class OrderEvent(Event):
     """
     Handles the event of sending an Order to an execution system.
-    The order contains a symbol (e.g. GOOG), a type (market or limit),
-    quantity and a direction.
+    The order contains a ticker (e.g. GOOG), action (BOT or SLD)
+    and quantity.
     """
 
-    def __init__(self, symbol, order_type, quantity, direction):
+    ## TODO:
+    ## in the future, add order type (market or limit) and qualifier (ftk)
+    ## https://www.cmegroup.com/confluence/display/EPICSANDBOX/Order+Types+for+Futures+and+Options
+
+    def __init__(self, ticker, action, quantity):
         """
-        Initialize the order type, setting whether it is a Market
-        order ('MKT') or Limit order ('LMT'), has a quantity
-        (integral) and its direction ('BUY' or 'SELL').
+        Initialize the OrderEvent.
 
         Parameters:
-        symbol - The instrument to trade.
-        order_type - 'MKT' ot 'LMT' for Market or Limit.
+        ticker - The instrument to trade.
+        action - 'BOT' or 'SLD' for long or short.
         quantity - Non-negative integer for quantity.
-        direction - 'BUY' or 'SELL' for long or short.
-
-
-        Further complication:
-            Order Type and Order Type Qualifier
-            https://www.cmegroup.com/confluence/display/EPICSANDBOX/Order+Types+for+Futures+and+Options
         """
 
-        self.type = "ORDER"
-        self.symbol = symbol
-        self.order_type = order_type
+        self.type = EventType.ORDER
+        self.ticker = ticker
+        self.action = action
         self.quantity = quantity
-        self.direction = direction
 
     def print_order(self):
         """
-        Outputs the values within the Order.
+        Outputs the values within the OrderEvent.
         """
-        print("Order: {}, {}, {}, {}".format(self.symbol, \
-                self.order_type, self.quantitym, self.direction))
+        print("Order: Ticker={}, Action={}, Quantity={}".format(
+                self.ticker, self.action, self.quantity
+                )
+            )
 
 
 class FillEvent(Event):
@@ -88,55 +201,33 @@ class FillEvent(Event):
     the commission of the trade from the brokerage.
     """
 
-    def __init__(self, timeindex, symbol, exchange, quantity,
-                direction, fill_cost, commission=None):
-        """
-        Initialize the FillEvent object. Sets the symbol,
-        exchange, quantity, direction, cost of fill and
-        an optional commission.
+    ## TODO: Currently does not support filling positions at
+    ## different prices. This will be simulated by averaging
+    ## the cost.
 
-        If commission is not provided, the Fill object will
-        calculate it based on the trade size and Interactive
-        Brokers fees.
+    def __init__(
+        self, timestamp, ticker,
+        action, quantity,
+        exchange, price,
+        commission):
+        """
+        Initialize the FillEvent object.
 
         Parameters:
-        timeindex - The bar-resolution when the order was filled.
-        symbol - The instrument which was filled.
-        exchange - The exchange where the order was filled.
+        timestamp - The timestamp when the order was filled.
+        ticker - The instrument which was filled.
+        action - "BOT" (for long) or "SLD" (for short).
         quantity - The filled quantity.
-        direction - The direction of fill ('BUY' or 'SELL')
-        fill_cost - The holdings value in dollars.
-        commission - An optional commission sent from IB.
+        exchange - The exchange where the order was filled.
+        price - The price at which the trade was filled.
+        commission - The brokerage commission for carrying out the trade.
         """
 
-        self.type = "FILL"
-        self.timeindex = timeindex
-        self.symbol = symbol
-        self.exchange = exchange
+        self.type = EventType.FILL
+        self.timestamp = timestamp
+        self.ticker = ticker
+        self.action = action
         self.quantity = quantity
-        self.direction = direction
-        self.fill_cost = fill_cost
-
-        # Calculate commission
-        if commission is None:
-            self.commission = self.calculate_ib_commission()
-        else:
-            self.commission = commission
-
-    def calculate_ib_commission(self):
-        """
-        Calculates the fees of trading based on an Interactive
-        Brokers fee structure for API, in USD.
-
-        This does not include exchange or ECN fees.
-
-        Based on "US API Directed Orders":
-        https://www.interactivebrokers.com/en/index.php?f=commission&p=stocks2
-        """
-        full_cost = 1.3
-        if self.quantity <= 500:
-            full_cost = max(1.3, 0.013 * self.quantity)
-        else: # Greater than 500
-            full_cost = max(1.3, 0.008 * self.quantity)
-        #full_cost = min(full_cost, 0.5 / 100.0 * self.quantity * self.fill_cost)
-        return full_cost
+        self.exchange = exchange
+        self.price = price
+        self.commission = commission

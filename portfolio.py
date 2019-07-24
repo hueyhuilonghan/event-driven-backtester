@@ -1,241 +1,141 @@
-import datetime
-import numpy as np
-import pandas as pd
-import queue
-
-from abc import ABCMeta, abstractmethod
-from math import floor
-
-from event import FillEvent, OrderEvent
+from position import Position
 
 class Portfolio(object):
     """
-    The Portfolio class handles the positions and and market
-    value of all instruments at a resolution of a "bar,"
-    i.e. secondly, minutely, 5-min, 30-min, 60-min or EOD.
+    The Portfolio class encapsulates a list of Positions,
+    as well as a cash balance, equity and PnL.
     """
 
-    __metaclass__ = ABCMeta
-
-    @abstractmethod
-    def update_signal(self, event):
+    def __init__(self, price_handler, cash):
         """
-        Acts on a SignalEvent to generate new orders
-        based on the portfolio logic.
+        On creation, the Portfolio object contains no
+        positions and all values are "reset" to the initial
+        cash, with no PnL
         """
-        raise NotImplementedError("Should implement update_signal()")
+        self.price_handler = price_handler
+        self.init_cash = cash
+        self.cur_cash = cash
+        self.positions = {}
+        self._reset_values()
 
-    @abstractmethod
-    def update_fill(self, event):
+
+    def _reset_values(self):
         """
-        Updates the portfolio current positions and holdings
-        from a FillEvent.
+        This is called after every position addition or
+        modification. It allows the calculations to be
+        carried out "from scratch" in order to minimize
+        errors.
+
+        All cash is reset to the inital values and the
+        PnL is set to zero.
         """
-        raise NotImplementedError("Should implement update_fill()")
+        self.cur_cash = self.init_cash
+        self.equity = self.cur_cash
+        self.unrealized_pnl = 0.0
+        self.realized_pnl = 0.0
 
-
-class NaivePortfolio(Portfolio):
-    """
-    The NaivePortfolio object is designed to send orders
-    to a brokerage object with a constant quantity size
-    blindly, i.e. without any risk management or position sizing.
-    It is used to test simpler strategies such as BuyAndHoldStrategy.
-    """
-
-    def __init__(self, bars, events, start_date, initial_capital=100000.0):
+    def _update_portfolio(self):
         """
-        Initializes the portfolio with bars and an event queue.
-        Also includes a starting datetime index and initial capital
-        (USD unless otherwise stated).
+        Updates the Portfolio total values (cash, equity,
+        unrealized PnL, realized PnL, cost basis, etc.) based
+        on all of the current ticker values.
 
-        Parameters:
-        bars - The DataHandler object with current market data.
-        events - The Event Queue object.
-        start_date - The start date (bar) of the portfolio.
-        initial_capital - The starting capital in USD.
+        This method is called after every Position modification.
         """
-        self.bars = bars
-        self.events = events
-        self.symbol_list = self.bars.symbol_list
-        self.start_date = start_date
-        self.initial_capital = initial_capital
+        for ticker in self.positions:
+            pt = self.positions[ticker]
+            self.unrealized_pnl += pt.unrealized_pnl
+            self.realized_pnl += pt.realized_pnl
+            self.cur_cash -= pt.cost_basis
+            pnl_diff = pt.realized_pnl - pt.unrealized_pnl
+            self.cur_cash += pnl_diff # why is it not += pt.realized_pnl
+            self.equity += (
+                pt.market_value - pt.cost_basis + pnl_diff
+            )
 
-        self.all_positions = self.construct_all_positions()
-        self.current_positions = dict((k, v) for k, v in [(s, 0) for s in self.symbol_list])
-
-        self.all_holdings = self.construct_all_holdings()
-        self.current_holdings = self.construct_current_holdings()
-
-
-    def construct_all_positions(self):
+    def _add_position(
+        self, action, ticker,
+        quantity, price, commission
+    ):
         """
-        Constructs the positions list using the start_date
-        to determine when the time index will begin.
+        Adds a new Position object to the Portfolio. This
+        requires getting the best bid/ask price from the
+        price handler in order to calculate a reasonable
+        "market value."
+
+        Once the Position is added, the Portfolio values
+        are updated.
         """
-        d = dict((k, v) for k, v in [(s, 0) for s in self.symbol_list])
-        d["datetime"] = self.start_date
-        return [d]
+        self._reset_values()
+        if ticker not in self.positions:
+            if self.price_handler.istick():
+                bid, ask = self.price_handler.get_best_bid_ask(ticker)
+            elif self.price_handler.isbar(): # does this make sense?
+                bid = self.price_handler.get_last_close(ticker)
+                ask = bid
 
-    def construct_all_holdings(self):
+            position = Position(
+                action, ticker, quantity,
+                price, commission, bid, ask
+            )
+            self.positions[ticker] = position
+            self._update_portfolio()
+        else:
+            print(
+                "Ticker {} is already in the positions list."\
+                "Could not add a new position.".format(ticker)
+            )
+
+    def _modify_position(
+        self, action, ticker,
+        quantity, price, commission
+    ):
         """
-        Constructs the holdings list using the start_date
-        to determine when the time index will begin.
+        Modifies a current Position object to the Portfolio.
+        This requries getting the best bid/ask price from the
+        price handler in order to calculate a reasonable
+        "market value."
         """
-        d = dict((k, v) for k, v in [(s, 0.0) for s in self.symbol_list])
-        d['datetime'] = self.start_date
-        d['cash'] = self.initial_capital
-        d['commission'] = 0.0
-        d['total'] = self.initial_capital
-        return [d]
+        self._reset_values()
+        if ticker in self.positions:
+            self.positions[ticker].transact_shares(
+                action, quantity, price, commission
+            )
 
-    def construct_current_holdings(self):
+            if self.price_handler.istick():
+                bid, ask = self.price_handler.get_best_bid_ask(ticker)
+            elif self.price_handler.isbar(): # does this make sense?
+                bid = self.price_handler.get_last_close(ticker)
+                ask = bid
+
+            #bid, ask = self.price_handler.get_best_bid_ask(ticker)
+            self.positions[ticker].update_market_value(bid, ask)
+            self._update_portfolio()
+        else:
+            print(
+                "Ticker {} not in the current position list."\
+                "Could not modify a current position.".format(ticker)
+            )
+
+    def transact_position(
+        self, action, ticker,
+        quantity, price, commission
+    ):
         """
-        This constructs the dictionary which will hold the
-        instantaneous value of the portfolio across all symbols.
+        Handles any new position or modification to
+        a current position, by calling the respective
+        _add_position and _modify_position methods.
+
+        Hence, this single method will be called by the
+        Portfoliohandler to update the Portfolio itself.
         """
-        d = dict((k, v) for k, v in [(s, 0) for s in self.symbol_list])
-        d['cash'] = self.initial_capital
-        d['commission'] = 0.0
-        d['total'] = self.initial_capital
-        return d
-
-    def update_timeindex(self, event):
-        """
-        Adds a new record to the positions matrix for the current
-        market data bar. This reflects the PREVIOUS bar, i.e. all
-        current market data at this stage is known.
-
-        Makes use of a MarketEvent from the events queue.
-        """
-        bars = {}
-        for sym in self.symbol_list:
-            bars[sym] = self.bars.get_latest_bars(sym, N=1)
-
-        # Update positions
-        dp = dict((k,v) for k, v in [(s, 0) for s in self.symbol_list])
-        dp['datetime'] = bars[self.symbol_list[0]][0][1]
-
-        for s in self.symbol_list:
-            dp[s] = self.current_positions[s]
-
-        # Append the current positions
-        self.all_positions.append(dp)
-
-        # Update holdings
-        dh = dict((k,v) for k, v in [(s, 0) for s in self.symbol_list])
-        dh['datetime'] = bars[self.symbol_list[0]][0][1]
-        dh['cash'] = self.current_holdings['cash']
-        dh['commission'] = self.current_holdings['commission']
-        dh['total'] = self.current_holdings['cash']
-
-        for s in self.symbol_list:
-            # Approximation to the real value
-            market_value = self.current_positions[s] * bars[s][0][5]
-            dh[s] = market_value
-            dh['total'] += market_value
-
-        # Append the current holdings
-        self.all_holdings.append(dh)
-
-    def update_positions_from_fill(self, fill):
-        """
-        Takes a FillEvent object and updates the position matrix
-        to reflect the new position.
-
-        Parameters:
-        fill - The FillEvent object to update the positions with.
-        """
-        # Check whether the fill is a buy or sell
-        fill_dir = 0
-        if fill.direction == "BUY":
-            fill_dir = 1
-        if fill.direction == "SELL":
-            fill_dir = -1
-
-        # Update positions list with new quantities
-        self.current_positions[fill.symbol] += fill_dir * fill.quantity
-
-    def update_holdings_from_fill(self, fill):
-        """
-        Takes a FillEvent object and updates the holdings matrix
-        to reflect the holdings value.
-
-        Parameters:
-        fill - The FillEvent object to update the holdings with.
-        """
-
-        # Check whether the fill is a buy or sell
-        fill_dir = 0
-        if fill.direction == "BUY":
-            fill_dir = 1
-        if fill.direction == "SELL":
-            fill_dir = -1
-
-        # Update holdings list with new quantities
-        fill_cost = self.bars.get_latest_bars(fill.symbol)[0][5] # Close price
-        cost = fill_dir * fill_cost * fill.quantity
-        self.current_holdings[fill.symbol] += cost
-        self.current_holdings['commission'] += fill.commission
-        self.current_holdings['cash'] -= (cost + fill.commission)
-        self.current_holdings['total'] -= (cost + fill.commission)
-
-    def update_fill(self, event):
-        """
-        Updates the portfolio current positions and all_holdings
-        from a FillEvent.
-        """
-        if event.type == "FILL":
-            self.update_positions_from_fill(event)
-            self.update_holdings_from_fill(event)
-
-    def generate_naive_order(self, signal):
-        """
-        Simply transacts an OrderEvent object as a constant quantity
-        sizing of the signal object, without risk management or
-        position sizing considerations.
-
-        Parameters:
-        signal - The SignalEvent signal information.
-        """
-        order = None
-
-        symbol = signal.symbol
-        direction = signal.signal_type
-        strength = signal.strength
-
-        mkt_quantity = floor(100 * strength)
-        cur_quantity = self.current_positions[symbol]
-        order_type = "MKT"
-
-        if direction == "LONG" and cur_quantity == 0:
-            order = OrderEvent(symbol, order_type, mkt_quantity, "BUY")
-        if direction == "SHORT" and cur_quantity == 0:
-            order = OrderEvent(symbol, order_type, mkt_quantity, "SELL")
-
-        if direction == "EXIT" and cur_quantity > 0:
-            order = OrderEvent(symbol, order_type, abs(cur_quantity), "SELL")
-        if direction == "EXIT" and cur_quantity < 0:
-            order = OrderEvent(symbol, order_type, abs(cur_quantity), "BUY")
-
-        return order
-
-    def update_signal(self, event):
-        """
-        Acts on a SignalEvent to generate new orders based on
-        the portfolio logic.
-        """
-        if event.type == "SIGNAL":
-            order_event = self.generate_naive_order(event)
-            self.events.put(order_event)
-
-
-    def create_equity_curve_dataframe(self):
-        """
-        Creates a pandas DataFrame from the all_holdings
-        list of dictionaries.
-        """
-        curve = pd.DataFrame(self.all_holdings)
-        curve.set_index('datetime', inplace=True)
-        curve['returns'] = curve['total'].pct_change()
-        curve['equity_curve'] = (1.0 + curve['returns']).cumprod()
-        self.equity_curve = curve
+        if ticker not in self.positions:
+            self._add_position(
+                action, ticker, quantity,
+                price, commission
+            )
+        else:
+            self._modify_position(
+                action, ticker, quantity,
+                price, commission
+            )
